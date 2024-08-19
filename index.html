@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NutriBullet Balance Controller</title>
+    <style>
+        @keyframes wobble {
+            0% { transform: rotate(0deg); }
+            25% { transform: rotate(-5deg); }
+            50% { transform: rotate(5deg); }
+            75% { transform: rotate(-5deg); }
+            100% { transform: rotate(0deg); }
+        }
+
+        #blenderAnimation {
+            width: 100px;
+            height: 100px;
+            background: url(https://upload.wikimedia.org/wikipedia/commons/7/75/Kitchen_blender.svg) no-repeat center center;
+            background-size: contain;
+            transition: transform 0.3s ease-in-out;
+        }
+
+        #blenderAnimation.blending {
+            animation: wobble 1s infinite; /* Wobble animation applied */
+        }
+
+        #customProfile {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ccc;
+        }
+
+        .step-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .step-row input {
+            width: 100px;
+            margin-right: 10px;
+        }
+
+        .step-row button {
+            margin-left: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>NutriBullet Balance Controller</h1>
+    <h4>
+        <a href="https://github.com/nightlark/nutribullet" target="_blank" style="text-decoration: none; color: inherit;">
+            <img src="https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png" alt="GitHub Logo" width="20" style="vertical-align: middle;">
+            <span style="vertical-align: middle;">View on GitHub</span>
+        </a>
+    </h4>
+    <button id="connectBtn">Connect to Blender</button>
+    <div id="status"></div>
+    <div id="info">
+        <p><strong>Scale Weight:</strong> <span id="scaleWeight">N/A</span></p>
+        <p><strong>Blend Status:</strong> <span id="blendStatus">N/A</span></p>
+        <p><strong>Motor Status:</strong> <span id="motorStatus">N/A</span></p>
+        <p><strong>Time Remaining:</strong> <span id="blendCountdown">0</span> seconds</p>
+    </div>
+    <div id="blenderAnimation"></div>
+    
+    <label for="profileSelect">Select Blend Profile:</label>
+    <select id="profileSelect">
+        <option value="b4a0">Standard Blend</option>
+        <option value="28a0 0c00 28a0 0c00 64a0">Super Blend</option>
+        <option value="14a0 0c00 14a0 0c00 3ca0">Crush</option>
+        <option value="04a0 0c00 04a0 0c00 04a0 0c00 04a0 0c00 04a0">Pulse</option>
+        <option value="14a0 0c00 14a0 0c00 14a0">Pulsed Blend</option>
+        <option value="1410 0c00 0a10 0a15 0a20 0a15 0a10">Test Speeds</option>
+        <option value="custom">Custom</option>
+    </select>
+    
+    <div id="customProfile">
+        <h3>Create Custom Profile</h3>
+        <div id="profileSteps"></div>
+        <button id="addStepBtn">Add Step</button>
+        <button id="saveProfileBtn">Save Profile</button>
+        <button id="copyProfileBtn">Copy Profile to Clipboard</button>
+        <button id="importProfileBtn">Import Profile</button>
+    </div>
+
+    <script>
+        const connectBtn = document.getElementById('connectBtn');
+        const statusDiv = document.getElementById('status');
+        const scaleWeightSpan = document.getElementById('scaleWeight');
+        const blendStatusSpan = document.getElementById('blendStatus');
+        const motorStatusSpan = document.getElementById('motorStatus');
+        const blendCountdownSpan = document.getElementById('blendCountdown');
+        const profileSelect = document.getElementById('profileSelect');
+        const blenderAnimation = document.getElementById('blenderAnimation');
+        const profileSteps = document.getElementById('profileSteps');
+        const addStepBtn = document.getElementById('addStepBtn');
+        const saveProfileBtn = document.getElementById('saveProfileBtn');
+        const copyProfileBtn = document.getElementById('copyProfileBtn');
+        const importProfileBtn = document.getElementById('importProfileBtn');
+
+        let blendTime = 0; // in seconds
+        let countdownInterval = null;
+
+        let blenderDevice = null;
+        let scaleCharacteristic = null;
+        let blendStatusCharacteristic = null;
+        let motorStatusCharacteristic = null;
+        let blendProfileCharacteristic = null;
+
+        connectBtn.addEventListener('click', async () => {
+            try {
+                const options = {
+                    filters: [
+                        { name: 'NutriBullet Balance' },
+                        { namePrefix: 'UBN' },
+                        { services: ['1bc50001-0200-0aa5-e311-24cb004a98c5', '18470001-b230-11e4-aea0-0002a5d5c51b'] }
+                    ]
+                };
+
+                console.log("Requesting Bluetooth device...");
+                statusDiv.textContent = "Requesting Bluetooth device...";
+
+                blenderDevice = await navigator.bluetooth.requestDevice(options);
+                const server = await blenderDevice.gatt.connect();
+
+                console.log('> Device Name:', blenderDevice.name);
+                console.log('> Device ID:', blenderDevice.id);
+                statusDiv.textContent = `Connected to ${blenderDevice.name}`;
+
+                const scaleService = await server.getPrimaryService('1bc50001-0200-0aa5-e311-24cb004a98c5');
+                scaleCharacteristic = await scaleService.getCharacteristic('1bc50002-0200-0aa5-e311-24cb004a98c5');
+                scaleCharacteristic.addEventListener('characteristicvaluechanged', handleScaleNotification);
+                await scaleCharacteristic.startNotifications();
+
+                const blenderService = await server.getPrimaryService('18470001-b230-11e4-aea0-0002a5d5c51b');
+                blendStatusCharacteristic = await blenderService.getCharacteristic('18470002-b230-11e4-aea0-0002a5d5c51b');
+                blendStatusCharacteristic.addEventListener('characteristicvaluechanged', handleBlendStatusNotification);
+                await readInitialBlendStatus();
+                await blendStatusCharacteristic.startNotifications();
+
+                motorStatusCharacteristic = await blenderService.getCharacteristic('18470003-b230-11e4-aea0-0002a5d5c51b');
+                motorStatusCharacteristic.addEventListener('characteristicvaluechanged', handleMotorStatusNotification);
+                await readInitialMotorStatus();
+                await motorStatusCharacteristic.startNotifications();
+
+                blendProfileCharacteristic = await blenderService.getCharacteristic('18470008-b230-11e4-aea0-0002a5d5c51b');
+                // Write initial profile for standard blend
+                writeProfile(profileSelect.value)
+            } catch (error) {
+                console.error('Error:', error);
+                statusDiv.textContent = `Error: ${error.message} (See console for details; make sure your browser supports Web Bluetooth, e.g. Chrome)`;
+            }
+        });
+
+        function startCountdown() {
+            stopCountdown(); // Clear any existing countdown
+            countdownInterval = setInterval(() => {
+                if (blendTime > 0) {
+                    blendTime--;
+                    blendCountdownSpan.textContent = blendTime;
+                } else {
+                    stopCountdown(); // Stop countdown when time is up
+                }
+            }, 1000);
+        }
+
+        function stopCountdown() {
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
+        }
+
+        function resetCountdown() {
+            stopCountdown(); // Stop any ongoing countdown
+            blendTime = 0;
+            blendCountdownSpan.textContent = blendTime;
+        }
+
+        async function readInitialBlendStatus() {
+            try {
+                const blendStatusValue = await blendStatusCharacteristic.readValue();
+                const blendStatus = blendStatusValue.getUint8(0);
+                updateBlendStatusDisplay(blendStatus);
+            } catch (error) {
+                console.error('Error reading initial blend status:', error);
+            }
+        }
+
+        async function readInitialMotorStatus() {
+            try {
+                const motorStatusValue = await motorStatusCharacteristic.readValue();
+                const motorStatus = motorStatusValue.getUint8(0);
+                updateMotorStatusDisplay(motorStatus);
+            } catch (error) {
+                console.error('Error reading initial motor status:', error);
+            }
+        }
+
+
+        function handleScaleNotification(event) {
+            const value = event.target.value;
+            const weight = value.getInt32(0, true); // Little Endian
+
+            if (weight < 0) {
+                scaleWeightSpan.textContent = 'No item on scale';
+            } else {
+                scaleWeightSpan.textContent = `${weight.toString(16)}`;
+            }
+        }
+
+        function handleBlendStatusNotification(event) {
+            const value = event.target.value;
+            const status = value.getUint8(0);
+            updateBlendStatusDisplay(status);
+        }
+
+        function updateBlendStatusDisplay(status) {
+            let statusText = '';
+            switch (status) {
+                case 0x00:
+                    statusText = 'No cup locked in';
+                    blenderAnimation.classList.remove('blending');
+                    resetCountdown();
+                    break;
+                case 0x03:
+                    statusText = 'Blender running';
+                    blenderAnimation.classList.add('blending');
+                    startCountdown();
+                    break;
+                case 0x02:
+                    statusText = 'Blend complete, cup not removed';
+                    blenderAnimation.classList.remove('blending');
+                    stopCountdown();
+                    break;
+                default:
+                    statusText = 'Unknown status';
+            }
+            blendStatusSpan.textContent = statusText;
+        }
+
+        function handleMotorStatusNotification(event) {
+            const value = event.target.value;
+            const status = value.getUint8(0);
+            updateMotorStatusDisplay(status);
+        }
+
+        function updateMotorStatusDisplay(status) {
+            let statusText = '';
+            switch (status) {
+                case 0x00:
+                    statusText = 'Motor off';
+                    break;
+                case 0x01:
+                    statusText = 'Motor on';
+                    break;
+                case 0x69:
+                    statusText = 'Blender just plugged in';
+                    break;
+                default:
+                    statusText = 'Unknown motor status';
+            }
+            motorStatusSpan.textContent = statusText;
+        }
+
+        function setBlendProfileTime(profileString) {
+            const profileBytes = profileString.replace(/\s+/g, '').match(/.{1,2}/g).map(byte => parseInt(byte, 16));
+
+            // Calculate total blend time in seconds
+            blendTime = 0;
+            for (let i = 0; i < profileBytes.length; i += 2) {
+                blendTime += (profileBytes[i] / 4); // Convert from quarter-seconds to seconds
+            }
+
+            blendCountdownSpan.textContent = blendTime;
+        }
+
+        function writeProfile(profile) {
+            setBlendProfileTime(profile);
+            const profileBytes = profile.replace(/\s+/g, '').match(/.{1,2}/g).map(byte => parseInt(byte, 16));
+            const profileArray = new Uint8Array(profileBytes);
+
+            blendProfileCharacteristic.writeValue(profileArray);
+            console.log('Profile written:', profileArray);
+        }
+
+        profileSelect.addEventListener('change', async () => {
+            const selectedProfile = profileSelect.value;
+            if (selectedProfile === 'custom') {
+                loadCustomProfile();
+                return;
+            }
+            writeProfile(selectedProfile);
+        });
+
+        // Custom Profile Logic
+        addStepBtn.addEventListener('click', () => {
+            addProfileStep();
+        });
+
+        saveProfileBtn.addEventListener('click', () => {
+            saveCustomProfile();
+        });
+
+        copyProfileBtn.addEventListener('click', () => {
+            copyCustomProfileToClipboard();
+        });
+
+        importProfileBtn.addEventListener('click', () => {
+            importCustomProfile();
+        });
+
+        function addProfileStep(time = '', speed = '') {
+            const stepRow = document.createElement('div');
+            stepRow.className = 'step-row';
+
+            const timeInput = document.createElement('input');
+            timeInput.type = 'number';
+            timeInput.placeholder = 'Time (1/4 sec)';
+            timeInput.value = time;
+
+            const speedInput = document.createElement('input');
+            speedInput.type = 'text';
+            speedInput.placeholder
+            speedInput.placeholder = 'Speed (e.g., A0)';
+            speedInput.value = speed;
+
+            const deleteButton = document.createElement('button');
+            deleteButton.textContent = 'Delete';
+            deleteButton.addEventListener('click', () => {
+                stepRow.remove();
+            });
+
+            stepRow.appendChild(timeInput);
+            stepRow.appendChild(speedInput);
+            stepRow.appendChild(deleteButton);
+
+            profileSteps.appendChild(stepRow);
+        }
+
+        function saveCustomProfile() {
+            const steps = [];
+            const stepRows = profileSteps.getElementsByClassName('step-row');
+            for (const row of stepRows) {
+                const time = parseInt(row.children[0].value);
+                const speed = row.children[1].value;
+                if (time && speed) {
+                    steps.push(time.toString(16).padStart(2, '0') + speed);
+                }
+            }
+
+            const profileString = steps.join(' ');
+            localStorage.setItem('customBlendProfile', profileString);
+            writeProfile(profileString);
+            alert('Custom blend profile saved!');
+
+            // Set custom profile as selected
+            profileSelect.value = 'custom';
+        }
+
+        function loadCustomProfile() {
+            const storedProfile = localStorage.getItem('customBlendProfile');
+            if (storedProfile) {
+                profileSteps.innerHTML = ''; // Clear current steps
+
+                const steps = storedProfile.split(' ');
+                for (const step of steps) {
+                    const time = parseInt(step.slice(0, 2), 16);
+                    const speed = step.slice(2).toUpperCase();
+                    addProfileStep(time, speed);
+                }
+
+                console.log('Custom profile loaded:', storedProfile);
+                writeProfile(storedProfile);
+            } else {
+                alert('No custom profile found. Create one first.');
+            }
+        }
+
+        function copyCustomProfileToClipboard() {
+            const customProfile = localStorage.getItem('customBlendProfile');
+            if (customProfile) {
+                navigator.clipboard.writeText(customProfile).then(() => {
+                    alert('Custom blend profile copied to clipboard!');
+                }).catch(err => {
+                    console.error('Error copying profile:', err);
+                });
+            } else {
+                alert('No custom profile found. Save one first.');
+            }
+        }
+
+        function importCustomProfile() {
+            const profileInput = prompt('Paste the custom profile string here:');
+            if (profileInput) {
+                localStorage.setItem('customBlendProfile', profileInput);
+                loadCustomProfile();
+                alert('Custom blend profile imported!');
+            }
+        }
+
+        // Load any existing custom profile on page load
+        window.onload = () => {
+            if (profileSelect.value === 'custom') {
+                loadCustomProfile();
+            }
+        };
+    </script>
+</body>
+</html>
