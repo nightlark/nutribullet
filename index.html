@@ -62,7 +62,13 @@
     <button id="connectBtn">Connect to Blender</button>
     <div id="status"></div>
     <div id="info">
-        <p><strong>Scale Weight:</strong> <span id="scaleWeight">N/A</span></p>
+        <p><strong>Scale Weight:</strong> <span id="scaleWeight">N/A</span>
+            <input type="radio" id="grams" name="weightUnit" value="grams" checked>
+            <label for="grams">g</label>
+            <input type="radio" id="lbOz" name="weightUnit" value="lbOz">
+            <label for="lbOz">lb/oz</label>
+            <button id="calibrateBtn">Calibrate</button>
+        </p>
         <p><strong>Blend Status:</strong> <span id="blendStatus">N/A</span></p>
         <p><strong>Motor Status:</strong> <span id="motorStatus">N/A</span></p>
         <p><strong>Time Remaining:</strong> <span id="blendCountdown">0</span> seconds</p>
@@ -91,6 +97,7 @@
 
     <script>
         const connectBtn = document.getElementById('connectBtn');
+        const calibrateBtn = document.getElementById('calibrateBtn');
         const statusDiv = document.getElementById('status');
         const scaleWeightSpan = document.getElementById('scaleWeight');
         const blendStatusSpan = document.getElementById('blendStatus');
@@ -103,6 +110,7 @@
         const saveProfileBtn = document.getElementById('saveProfileBtn');
         const copyProfileBtn = document.getElementById('copyProfileBtn');
         const importProfileBtn = document.getElementById('importProfileBtn');
+        const weightUnitRadios = document.getElementsByName('weightUnit');
 
         let blendTime = 0; // in seconds
         let countdownInterval = null;
@@ -158,6 +166,8 @@
             }
         });
 
+        calibrateBtn.addEventListener('click', calibrateScale);
+
         function startCountdown() {
             stopCountdown(); // Clear any existing countdown
             countdownInterval = setInterval(() => {
@@ -203,15 +213,32 @@
             }
         }
 
-
         function handleScaleNotification(event) {
             const value = event.target.value;
             const weight = value.getInt32(0, true); // Little Endian
 
-            if (weight < 0) {
-                scaleWeightSpan.textContent = 'No item on scale';
+            const calibrationData = JSON.parse(localStorage.getItem('scaleCalibration'));
+            if (calibrationData) {
+                const { emptyWeight, cupWeight } = calibrationData;
+                const calibratedWeight = (weight - emptyWeight) * (192 / (cupWeight - emptyWeight));
+                const totalGrams = calibratedWeight;
+                const totalOunces = totalGrams / 28.3495;
+                const pounds = Math.floor(totalOunces / 16);
+                const ounces = totalOunces % 16;
+
+                const selectedUnit = Array.from(weightUnitRadios).find(radio => radio.checked).value;
+                if (selectedUnit === 'grams') {
+                    scaleWeightSpan.textContent = `${totalGrams.toFixed(2)} g`;
+                } else {
+                    scaleWeightSpan.textContent = `${pounds} lb ${ounces.toFixed(2)} oz`;
+                }
+                scaleWeightSpan.title = `${weight.toString(16)}`;
             } else {
-                scaleWeightSpan.textContent = `${weight.toString(16)}`;
+                if (weight < 0) {
+                    scaleWeightSpan.textContent = 'No item on scale';
+                } else {
+                    scaleWeightSpan.textContent = `${weight.toString(16)}`;
+                }
             }
         }
 
@@ -403,6 +430,29 @@
                 loadCustomProfile();
                 alert('Custom blend profile imported!');
             }
+        }
+
+        async function calibrateScale() {
+            const emptyWeight = await getWeight('Please remove all items from the scale and press OK.');
+            const cupWeight = await getWeight('Please place the empty cup on the scale and press OK.');
+
+            const calibrationData = {
+                emptyWeight,
+                cupWeight
+            };
+
+            localStorage.setItem('scaleCalibration', JSON.stringify(calibrationData));
+            alert('Scale calibration completed and saved.');
+        }
+
+        function getWeight(message) {
+            return new Promise((resolve) => {
+                alert(message);
+                scaleCharacteristic.readValue().then((value) => {
+                    const weight = value.getInt32(0, true); // Little Endian
+                    resolve(weight);
+                });
+            });
         }
 
         // Load any existing custom profile on page load
